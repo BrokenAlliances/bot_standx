@@ -108,7 +108,7 @@ ipython_config.py
 .pdm.toml
 .pdm-python
 .pdm-build/
-
+bot_standx
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and others
 __pypackages__/
 
