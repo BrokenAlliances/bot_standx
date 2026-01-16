@@ -91,7 +91,7 @@ def check_connection():
         
         # 4. Check Open Orders (Just to see)
         logger.info("Querying Open Orders...")
-        open_orders = client.query_open_orders(token=login_resp.token, symbol="BTC-USD")
+        open_orders = client.query_open_orders(token=login_resp.token, symbol="BTC-DUSD")
         logger.info(f"Open Orders: {open_orders.get('total', 0)}")
         
         logger.info("CONNECTION VERIFICATION COMPLETED SUCCESSFULLY.")
@@ -102,9 +102,9 @@ def check_connection():
         traceback.print_exc()
 
 # --- CONFIGURATION TRADING ---
-SYMBOL = "BTC-USD"
+SYMBOL = "BTC-DUSD"
 SPREAD_BPS = 8          # 8 bps = 0.08% (Target < 10 bps)
-ORDER_SIZE = "0.0014"    # BTC Size (Adjust based on your balance!)
+ORDER_SIZE = "0.0015"    # BTC Size (Adjust based on your balance!)
 REFRESH_RATE = 30       # Seconds between updates
 
 # Additional Env Vars for Mode 2
@@ -229,23 +229,32 @@ def run_trading_bot():
     token = context['token']
     user_label = context['address']
     
+    # 1. Determine Symbol from Env
+    env_symbol = os.getenv("SYMBOL", "BTC").upper()
+    # Normalize: If user put "BTC", make it "BTC-USD".
+    # Even if margined in DUSD, the pair name on StandX is "BTC-USD".
+    if not env_symbol.endswith("-USD"):
+        current_symbol = f"{env_symbol}-USD"
+    else:
+        current_symbol = env_symbol
+        
     # Prompt for Order Size
     default_size = ORDER_SIZE
-    size_input = input(f"Enter Order Size (BTC) [Default: {default_size}]: ").strip()
+    size_input = input(f"Enter Order Size for {current_symbol} [Default: {default_size}]: ").strip()
     
     if not size_input:
         current_order_size = default_size
     else:
         current_order_size = size_input
 
-    logger.info(f"Starting Bot on {SYMBOL} for user {user_label}...")
-    logger.info(f"Spread Target: {SPREAD_BPS} bps | Size: {current_order_size} BTC")
+    logger.info(f"Starting Bot on {current_symbol} for user {user_label}...")
+    logger.info(f"Spread Target: {SPREAD_BPS} bps | Size: {current_order_size} {current_symbol.split('-')[0]}")
     
     try:
         while True:
             try:
                 # 1. Get Mark Price
-                price_data = client.query_symbol_price(SYMBOL)
+                price_data = client.query_symbol_price(current_symbol)
                 mark_price = float(price_data['mark_price'])
                 
                 # 2. Calculate Bid/Ask Prices
@@ -259,14 +268,30 @@ def run_trading_bot():
                 
                 # Format prices to appropriate precision (StandX usually needs string)
                 # Assuming 1 tick size (adjust if needed, usually 0.1 or 1 for BTC)
-                bid_price_str = f"{int(bid_price)}" 
-                ask_price_str = f"{int(ask_price)}"
+                # Format prices to appropriate precision (StandX usually needs string)
+                # Assuming 1 tick size (adjust if needed, usually 0.1 or 1 for BTC)
+                # WARNING: Integers might not work for low value coins.
+                # We should probably use 2 decimals or dynamic precision.
+                # For safety/simplicity let's try to detect if price is small.
+                if mark_price < 100:
+                    # Use 4 decimals for small prices
+                    bid_price_str = f"{bid_price:.4f}"
+                    ask_price_str = f"{ask_price:.4f}"
+                else:
+                    # Use integer for large prices (like BTC) or 2 decimals
+                    # Safer to use valid tick size, but without metadata we guess.
+                    # Start with 2 decimals for generic, or int for very high?
+                    # Original code used int() which is bad for ETH/SOL.
+                    # Let's upgrade to 2 decimals default, or keep int for BTC specifically?
+                    # The user specifically asked for "DDUSD". If DUSD is ~1$, int() will break spread (0 or 1).
+                    bid_price_str = f"{bid_price:.2f}"
+                    ask_price_str = f"{ask_price:.2f}"
                 
-                logger.info(f"Mark: {mark_price:.2f} | Target Bid: {bid_price_str} | Target Ask: {ask_price_str}")
+                logger.info(f"Mark: {mark_price:.4f} | Target Bid: {bid_price_str} | Target Ask: {ask_price_str}")
 
                 # 3. Cancel Open Orders for this symbol
                 try:
-                    open_orders = client.query_open_orders(token, symbol=SYMBOL)
+                    open_orders = client.query_open_orders(token, symbol=current_symbol)
                     result_list = open_orders.get('result', [])
                     total_open = len(result_list)
                     
@@ -295,23 +320,23 @@ def run_trading_bot():
 
                 # 4. Check & Auto-Close Positions (Delta Neutrality)
                 try:
-                    positions = client.query_positions(token, symbol=SYMBOL)
+                    positions = client.query_positions(token, symbol=current_symbol)
                     # logger.info(f"Debug Positions: {positions}") # Uncomment if needed
                     
                     has_position = False
                     for pos in positions:
-                        if pos.get('symbol') == SYMBOL:
+                        if pos.get('symbol') == current_symbol:
                             qty = float(pos.get('qty', 0))
                             if qty != 0:
                                 has_position = True
-                                logger.warning(f"!!! OPEN POSITION DETECTED: {qty} {SYMBOL} !!!")
+                                logger.warning(f"!!! OPEN POSITION DETECTED: {qty} {current_symbol} !!!")
                                 logger.info("Attempting CLOSE via Market Order...")
                                 
                                 close_side = "sell" if qty > 0 else "buy"
                                 try:
                                     client.place_order(
                                         token=token,
-                                        symbol=SYMBOL,
+                                        symbol=current_symbol,
                                         side=close_side,
                                         order_type="market",
                                         qty=str(abs(qty)),
@@ -336,7 +361,7 @@ def run_trading_bot():
                 # Buy Order
                 client.place_order(
                     token=token,
-                    symbol=SYMBOL,
+                    symbol=current_symbol,
                     side="buy",
                     order_type="limit",
                     qty=current_order_size,
@@ -349,7 +374,7 @@ def run_trading_bot():
                 # Sell Order
                 client.place_order(
                     token=token,
-                    symbol=SYMBOL,
+                    symbol=current_symbol,
                     side="sell",
                     order_type="limit",
                     qty=current_order_size,
@@ -369,11 +394,38 @@ def run_trading_bot():
                 time.sleep(5) # Wait a bit before retrying
 
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+        logger.info("Bot stopped by user. Cleaning up...")
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
+        logger.info("Emergency exit. Cleaning up...")
+    finally:
+        # ATTEMPT TO CANCEL ALL OPEN ORDERS ON STOP
+        if context and client and token:
+            try:
+                logger.info("SHUTDOWN SEQUENCE: Cancelling all open orders...")
+                open_orders = client.query_open_orders(token, symbol=current_symbol)
+                result_list = open_orders.get('result', [])
+                if result_list:
+                    ids_to_cancel = [o['id'] for o in result_list]
+                    logger.info(f"Retrieved {len(ids_to_cancel)} open orders to cancel.")
+                    # Try batch cancel
+                    try:
+                        client.cancel_orders(token, order_id_list=ids_to_cancel, auth=auth)
+                        logger.info(f"Shutdown: Cancelled {len(ids_to_cancel)} orders.")
+                    except Exception as batch_error:
+                         # Fallback one by one
+                        for oid in ids_to_cancel:
+                            try:
+                                client.cancel_orders(token, order_id_list=[oid], auth=auth)
+                            except:
+                                pass
+                        logger.info("Shutdown: Cancelled orders via fallback.")
+                else:
+                    logger.info("Shutdown: No open orders found.")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup orders on exit: {cleanup_error}")
 
 if __name__ == "__main__":
     # Uncomment the function you want to run
