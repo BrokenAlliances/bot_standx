@@ -84,7 +84,7 @@ Follow the CLI prompts:
     *   Type `2` for API Token (Keyless).
 2.  **Order Size**:
     *   Enter the desired Order Size in BTC (e.g., `0.005`).
-    *   Press Enter to use the default (`0.0014` BTC).
+    *   Press Enter to use the default (`0.0015` BTC).
 
 The bot will start logging its activity: fetching prices, cancelling old orders, closing positions (if any), and placing new orders.
 
