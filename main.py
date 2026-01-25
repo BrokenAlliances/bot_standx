@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from datetime import datetime
 
 # StandX libraries
 from perp_http import StandXPerpHTTP
@@ -140,6 +141,38 @@ def get_auth_context_private_key():
         logger.error(f"Authentication failed: {e}")
         return None
 
+def cancel_all_open_orders(client, token, symbol, auth):
+    """
+    Helper to cancel all open orders for a symbol.
+    """
+    try:
+        open_orders = client.query_open_orders(token, symbol=symbol)
+        result_list = open_orders.get('result', [])
+        
+        if not result_list:
+            return False
+            
+        ids_to_cancel = [o['id'] for o in result_list]
+        # Only log if we found something
+        if ids_to_cancel:
+            logger.info(f"Cancelling {len(ids_to_cancel)} open orders...")
+            
+            # Try batch cancel
+            try:
+                client.cancel_orders(token, order_id_list=ids_to_cancel, auth=auth)
+            except Exception:
+                # Fallback: one by one
+                for oid in ids_to_cancel:
+                    try:
+                        client.cancel_orders(token, order_id_list=[oid], auth=auth)
+                    except:
+                        pass
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error cancelling orders: {e}")
+        return False
+
 
 
 def get_auth_context_api_token():
@@ -253,6 +286,16 @@ def run_trading_bot():
     try:
         while True:
             try:
+                # 0. UPTIME STRATEGY: PAUSE AFTER MINUTE 45
+                # StandX requires ~42 mins (70%) for Boosted Tier.
+                # User requested 45 mins to minimize fee exposure.
+                now_minute = datetime.now().minute
+                if now_minute >= 45:
+                    logger.info(f"Minute {now_minute} >= 45. Pausing to minimize fees (Target 45m uptime).")
+                    cancel_all_open_orders(client, token, current_symbol, auth)
+                    time.sleep(60)
+                    continue
+
                 # 1. Get Mark Price
                 price_data = client.query_symbol_price(current_symbol)
                 mark_price = float(price_data['mark_price'])
@@ -268,8 +311,6 @@ def run_trading_bot():
                 
                 # Format prices to appropriate precision (StandX usually needs string)
                 # Assuming 1 tick size (adjust if needed, usually 0.1 or 1 for BTC)
-                # Format prices to appropriate precision (StandX usually needs string)
-                # Assuming 1 tick size (adjust if needed, usually 0.1 or 1 for BTC)
                 # WARNING: Integers might not work for low value coins.
                 # We should probably use 2 decimals or dynamic precision.
                 # For safety/simplicity let's try to detect if price is small.
@@ -283,40 +324,14 @@ def run_trading_bot():
                     # Start with 2 decimals for generic, or int for very high?
                     # Original code used int() which is bad for ETH/SOL.
                     # Let's upgrade to 2 decimals default, or keep int for BTC specifically?
-                    # The user specifically asked for "DDUSD". If DUSD is ~1$, int() will break spread (0 or 1).
                     bid_price_str = f"{bid_price:.2f}"
                     ask_price_str = f"{ask_price:.2f}"
                 
                 logger.info(f"Mark: {mark_price:.4f} | Target Bid: {bid_price_str} | Target Ask: {ask_price_str}")
 
                 # 3. Cancel Open Orders for this symbol
-                try:
-                    open_orders = client.query_open_orders(token, symbol=current_symbol)
-                    result_list = open_orders.get('result', [])
-                    total_open = len(result_list)
-                    
-                    if total_open > 0:
-                        logger.info(f"Found {total_open} open orders. Cancelling...")
-                        # Log shows key is 'id', not 'order_id'
-                        ids_to_cancel = [o['id'] for o in result_list]
-                        
-                        if ids_to_cancel:
-                            # Try batch cancel first
-                            try:
-                                client.cancel_orders(token, order_id_list=ids_to_cancel, auth=auth)
-                                logger.info(f"SUCCESS: Cancelled {len(ids_to_cancel)} orders (Batch).")
-                            except Exception as batch_error:
-                                logger.warning(f"Batch cancel failed ({batch_error}). Retrying one by one...")
-                                # Fallback: one by one
-                                for oid in ids_to_cancel:
-                                    try:
-                                        client.cancel_orders(token, order_id_list=[oid], auth=auth)
-                                        logger.info(f"Cancelled order {oid}")
-                                    except Exception as single_error:
-                                        logger.error(f"FAILED to cancel order {oid}: {single_error}")
-
-                except Exception as e:
-                    logger.error(f"CRITICAL ERROR in Cancel Orders step: {e}")
+                # Use our new helper
+                cancel_all_open_orders(client, token, current_symbol, auth)
 
                 # 4. Check & Auto-Close Positions (Delta Neutrality)
                 try:
@@ -405,25 +420,7 @@ def run_trading_bot():
         if context and client and token:
             try:
                 logger.info("SHUTDOWN SEQUENCE: Cancelling all open orders...")
-                open_orders = client.query_open_orders(token, symbol=current_symbol)
-                result_list = open_orders.get('result', [])
-                if result_list:
-                    ids_to_cancel = [o['id'] for o in result_list]
-                    logger.info(f"Retrieved {len(ids_to_cancel)} open orders to cancel.")
-                    # Try batch cancel
-                    try:
-                        client.cancel_orders(token, order_id_list=ids_to_cancel, auth=auth)
-                        logger.info(f"Shutdown: Cancelled {len(ids_to_cancel)} orders.")
-                    except Exception as batch_error:
-                         # Fallback one by one
-                        for oid in ids_to_cancel:
-                            try:
-                                client.cancel_orders(token, order_id_list=[oid], auth=auth)
-                            except:
-                                pass
-                        logger.info("Shutdown: Cancelled orders via fallback.")
-                else:
-                    logger.info("Shutdown: No open orders found.")
+                cancel_all_open_orders(client, token, current_symbol, auth)
             except Exception as cleanup_error:
                 logger.error(f"Failed to cleanup orders on exit: {cleanup_error}")
 
